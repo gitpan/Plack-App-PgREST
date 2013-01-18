@@ -1,7 +1,7 @@
 package Plack::App::PgREST;
 use methods;
 use 5.008_001;
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 use Plack::Builder;
 use Router::Resource;
 use parent qw(Plack::Component);
@@ -9,6 +9,15 @@ use Plack::Util::Accessor qw( dsn dbh pg_version );
 use Plack::Request;
 use IPC::Run3 qw(run3);
 use JSON::PP qw(encode_json decode_json);
+use File::Slurp qw(read_file);
+use File::ShareDir qw(dist_file);
+use parent qw(Exporter);
+
+our @EXPORT = qw(pgrest);
+
+sub pgrest {
+    __PACKAGE__->new( @_ > 1 ? @_ : dsn => 'dbi:Pg:'.$_[0] )->to_app;
+}
 
 # maintain json object field order
 use Tie::IxHash;
@@ -81,16 +90,17 @@ method _mk_func($name, $param, $ret, $body, $lang, $dont_compile) {
 #        ? "JSON.stringify(($compiled)(@{[ join(',', map { qq!JSON.parse($_)! } @args) ]}));"
 #        : "($compiled)(@{[ join(',', @args) ]})";
     return qq<
-DO \$EOF\$ BEGIN
+SET client_min_messages TO WARNING;
+DO \$PGREST_EOF\$ BEGIN
 
 DROP FUNCTION IF EXISTS $name (@{[ join(',', @params) ]});
 DROP FUNCTION IF EXISTS $name (@{[ join(',', map { /pgrest_json/ ? 'json' : $_ } @params) ]});
 
-CREATE FUNCTION $name (@{[ join(',', @params) ]}) RETURNS $ret AS \$\$
+CREATE FUNCTION $name (@{[ join(',', @params) ]}) RETURNS $ret AS \$PGREST_$name\$
 return $body
-\$\$ LANGUAGE $lang IMMUTABLE STRICT;
+\$PGREST_$name\$ LANGUAGE $lang IMMUTABLE STRICT;
 
-EXCEPTION WHEN OTHERS THEN END; \$EOF\$;
+EXCEPTION WHEN OTHERS THEN END; \$PGREST_EOF\$;
     >;
 }
 
@@ -99,6 +109,7 @@ method bootstrap {
     ($self->{pg_version}) = $self->{dbh}->selectall_arrayref("select version()")->[0][0] =~ m/PostgreSQL ([\d\.]+)/;
     if ($self->{pg_version} ge '9.1.0') {
         $self->{dbh}->do(<<'EOF');
+SET client_min_messages TO WARNING;
 DO $$ BEGIN
     CREATE EXTENSION IF NOT EXISTS plv8;
 EXCEPTION WHEN OTHERS THEN END; $$;
@@ -115,6 +126,7 @@ EOF
     
     if ($self->{pg_version} lt '9.2.0') {
         $self->{dbh}->do(<<'EOF');
+SET client_min_messages TO WARNING;
 DO $$ BEGIN
     CREATE FUNCTION json_syntax_check(src text) RETURNS boolean AS '
         try { JSON.parse(src); return true; } catch (e) { return false; }
@@ -128,6 +140,7 @@ EOF
     }
     else {
         $self->{dbh}->do(<<'EOF');
+SET client_min_messages TO WARNING;
 DO $$ BEGIN
     CREATE DOMAIN pgrest_json AS json;
 EXCEPTION WHEN OTHERS THEN END; $$;
@@ -144,9 +157,7 @@ function (func, args) {
 }
 END
 
-# XXX: use File::ShareDir
-    my $ls = do { local $/; open my $fh, '<', './share/livescript.js'; <$fh> };
-    $ls =~ s/\$\$/\\\$\\\$/g;
+    my $ls = read_file( dist_file('Plack-App-PgREST',  'livescript.js') );
     $self->{dbh}->do($self->_mk_func("lsbootstrap", [], "pgrest_json", << "END", 'plv8'));
 function() { jsid = 0; LiveScript = $ls }
 END
@@ -193,7 +204,7 @@ cond = (model, spec) -> switch typeof spec
     | \string => qq spec
     | \object =>
         # Implicit AND on all k,v
-        ([ test model, qq(k), v for k, v of spec ].reduce (+++)) * " AND "
+        ([ test model, qq(k), v for k, v of spec ].reduce (++)) * " AND "
     | _ => it
 
 test = (model, key, expr) -> switch typeof expr
@@ -282,7 +293,8 @@ Plack::App::PgREST - http://postgre.st/
 
 =head1 SYNOPSIS
 
-  use Plack::App::PgREST;
+  # install plv8 extension for pg first
+  plackup -MPlack::App::PgREST -e 'pgrest q{db=MYDB}'
 
 =head1 DESCRIPTION
 
@@ -309,6 +321,30 @@ capable of loading Node.js modules
 =item
 
 compatible with MongoLab's REST API
+
+=back
+
+=head1 INSTALL
+
+=over
+
+=item
+
+Install pgxn:
+
+  sudo easy_install pgxnclient
+
+=item
+
+Install libv8 (for older distro (lucid, natty): sudo add-apt-repository ppa:martinkl/ppa)
+
+  sudo apt-get install libv8-dev
+
+=item
+
+Install plv8 pgxn:
+
+  sudo pgxn install plv8
 
 =back
 
