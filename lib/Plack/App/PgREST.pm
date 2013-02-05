@@ -13,7 +13,7 @@ use File::Slurp qw(read_file);
 use File::ShareDir qw(dist_file);
 use parent qw(Exporter);
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 our @EXPORT = qw(pgrest);
 
 sub pgrest {
@@ -95,7 +95,6 @@ SET client_min_messages TO WARNING;
 DO \$PGREST_EOF\$ BEGIN
 
 DROP FUNCTION IF EXISTS $name (@{[ join(',', @params) ]});
-DROP FUNCTION IF EXISTS $name (@{[ join(',', map { /pgrest_json/ ? 'json' : $_ } @params) ]});
 
 CREATE FUNCTION $name (@{[ join(',', @params) ]}) RETURNS $ret AS \$PGREST_$name\$
 return $body
@@ -122,6 +121,19 @@ EOF
     else {
         # bootstrap with sql
         
+        my $dir = `pg_config --sharedir`;
+        chomp $dir;
+        use File::Glob qw(bsd_glob);
+        my @init_files = sort { $b cmp $a } bsd_glob("$dir/contrib/plv8*.sql");
+        if (@init_files > 1) {
+            warn "==> more than one version of plv8 found: ".join(',',@init_files);
+        }
+
+        eval {
+            $self->{dbh}->do(scalar read_file($init_files[0]));
+        };
+
+        $self->{dbh}->do('rollback') if $self->{dbh}->err;
     }
     
     
